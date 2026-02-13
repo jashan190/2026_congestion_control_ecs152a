@@ -9,141 +9,150 @@ import time
 import os
 import select
 
-FILE_PATH = 'docker/file.mp3'
-RECEIVER_IP = 'localhost'
+FILE_PATH = "docker/file.mp3"
+RECEIVER_IP = "localhost"
 RECEIVER_PORT = 5001
+
 PACKET_SIZE = 1024
 SEQ_ID_SIZE = 4
-MESSAGE_SIZE = PACKET_SIZE - SEQ_ID_SIZE
+PAYLOAD_SIZE = PACKET_SIZE - SEQ_ID_SIZE
+
 WINDOW_SIZE = 100
-# retransmit if no ACK received for base within 0.5 seconds
-TIMEOUT = 0.5  
+TIMEOUT = 0.5
+NUM_ITERATIONS = 10
 
 
-def create_packet(seq_id, data: bytes) -> bytes:
-    return int.to_bytes(seq_id, SEQ_ID_SIZE, signed=True, byteorder='big') + data
+def make_packet(seq_id: int, payload: bytes) -> bytes:
+    return int.to_bytes(seq_id, SEQ_ID_SIZE, signed=True, byteorder="big") + payload
 
 
-def parse_ack(data: bytes):
-    ack_seq = int.from_bytes(data[:SEQ_ID_SIZE], signed=True, byteorder='big')
-    msg = data[SEQ_ID_SIZE:].decode('utf-8', errors='ignore')
+def parse_ack(buf: bytes):
+    ack_seq = int.from_bytes(buf[:SEQ_ID_SIZE], signed=True, byteorder="big")
+    msg = buf[SEQ_ID_SIZE:].decode("utf-8", errors="ignore")
     return ack_seq, msg
 
 
-def run_sender():
-    if not os.path.exists(FILE_PATH):
-        return 0.0, 0.0, 0.0
+def load_packets(path: str):
+    if not os.path.exists(path):
+        return {}, 0
 
-    # handle empty file case
     packets = {}
-    curr_seq = 0
-    with open(FILE_PATH, 'rb') as f:
+    seq = 0
+    with open(path, "rb") as f:
         while True:
-            chunk = f.read(MESSAGE_SIZE)
+            chunk = f.read(PAYLOAD_SIZE)
             if not chunk:
                 break
-            packets[curr_seq] = chunk
-            curr_seq += len(chunk)
+            packets[seq] = chunk
+            seq += len(chunk)
 
-    total_bytes = curr_seq
-    seqs = sorted(packets.keys())  # packet boundary list
+    return packets, seq
 
-    # setup socket for UDP communication
+
+def run_sender_fixed():
+    packets, total_bytes = load_packets(FILE_PATH)
+    if total_bytes == 0:
+        return 0.0, 0.0, 0.0
+
+    seq_list = sorted(packets.keys())
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 0))     
+    sock.bind(("0.0.0.0", 0))
     sock.setblocking(False)
 
-    # throughput timer right after the socket setup
-    start_time = time.time()     
+    start = time.time()
 
-    # the base and the right edge of the window 
     base = 0
-    next_seq_num = 0
+    next_seq = 0
 
-    send_times = {}      
-    packet_delays = []  
-    last_progress_time = time.time()
+    first_send = {}   # seq -> time
+    delays = []
+    last_progress = time.time()
 
-    # loop for sending packets in the sliding window until all bytes are acknowledged
     while base < total_bytes:
-        # allow up to WINDOW_SIZE. Unless it's reaches the end of the file. 
-        window_right = base + (WINDOW_SIZE * MESSAGE_SIZE)
-        while next_seq_num < total_bytes and next_seq_num < window_right:
-            pkt = create_packet(next_seq_num, packets[next_seq_num])
-            sock.sendto(pkt, (RECEIVER_IP, RECEIVER_PORT))
+        win_end = base + WINDOW_SIZE * PAYLOAD_SIZE
 
-            if next_seq_num not in send_times:
-                send_times[next_seq_num] = time.time()
+        while next_seq < total_bytes and next_seq < win_end:
+            sock.sendto(make_packet(next_seq, packets[next_seq]), (RECEIVER_IP, RECEIVER_PORT))
 
-            next_seq_num += len(packets[next_seq_num])
+            if next_seq not in first_send:
+                first_send[next_seq] = time.time()
 
-        # process cumulative acks and update base. 
+            next_seq += len(packets[next_seq])
+
         try:
-            ready = select.select([sock], [], [], 0.01)
-            if ready[0]:
+            r, _, _ = select.select([sock], [], [], 0.01)
+            if r:
                 data, _ = sock.recvfrom(PACKET_SIZE)
                 ack_seq, _ = parse_ack(data)
+
                 if ack_seq > base:
                     old_base = base
                     now = time.time()
 
-                    # record delays for newly acked packets
-                    for s in seqs:
+                    for s in seq_list:
                         if s < old_base:
                             continue
                         end = s + len(packets[s])
                         if end <= ack_seq:
-                            if s in send_times:
-                                packet_delays.append(now - send_times[s])
-                                del send_times[s]
+                            t0 = first_send.pop(s, None)
+                            if t0 is not None:
+                                delays.append(now - t0)
                         else:
                             break
 
                     base = ack_seq
-                    last_progress_time = now
+                    last_progress = now
 
         except (BlockingIOError, OSError):
             pass
 
-        # handle timeout and retransmit base packet go back N style
-        if time.time() - last_progress_time > TIMEOUT:
+        # timeout -> resend base
+        if time.time() - last_progress > TIMEOUT:
             if base < total_bytes:
-                pkt = create_packet(base, packets[base])
-                sock.sendto(pkt, (RECEIVER_IP, RECEIVER_PORT))
-                last_progress_time = time.time()
+                sock.sendto(make_packet(base, packets[base]), (RECEIVER_IP, RECEIVER_PORT))
+            last_progress = time.time()
 
-    # stop throughput timer after all ack
-    ack_all_time = time.time()
+    ack_done = time.time()
 
-    # send empty packet with seq_id = total_bytes to signal end of transmission
-    fin_received = False
+    # fin
     for _ in range(10):
-        sock.sendto(create_packet(total_bytes, b''), (RECEIVER_IP, RECEIVER_PORT))
+        sock.sendto(make_packet(total_bytes, b""), (RECEIVER_IP, RECEIVER_PORT))
         try:
-            ready = select.select([sock], [], [], 0.5)
-            if ready[0]:
+            r, _, _ = select.select([sock], [], [], 0.5)
+            if r:
                 data, _ = sock.recvfrom(PACKET_SIZE)
                 _, msg = parse_ack(data)
-                if msg == 'fin':
-                    fin_received = True
+                if msg == "fin":
                     break
         except Exception:
             pass
 
-    sock.sendto(create_packet(total_bytes, b'==FINACK=='), (RECEIVER_IP, RECEIVER_PORT))
+    sock.sendto(make_packet(total_bytes, b"==FINACK=="), (RECEIVER_IP, RECEIVER_PORT))
     sock.close()
 
-    # metrics calculation for output
-    duration = ack_all_time - start_time
-    throughput = (total_bytes / duration) if duration > 0 else 0.0
+    dur = ack_done - start
+    tp = (total_bytes / dur) if dur > 0 else 0.0
+    avg_delay = (sum(delays) / len(delays)) if delays else 0.0
+    metric = (0.3 * (tp / 1000.0)) + (0.7 / avg_delay) if avg_delay > 0 else 0.0
 
-    avg_delay = (sum(packet_delays) / len(packet_delays)) if packet_delays else 0.0
-
-    metric = (0.3 * (throughput / 1000.0)) + (0.7 / avg_delay) if avg_delay > 0 else 0.0
-
-    return throughput, avg_delay, metric
+    return tp, avg_delay, metric
 
 
 if __name__ == "__main__":
-    tp, d, m = run_sender()
-    print(f"{tp:.7f},{d:.7f},{m:.7f}")
+    tps, ds, ms = [], [], []
+
+    for _ in range(NUM_ITERATIONS):
+        tp, d, m = run_sender_fixed()
+        tps.append(tp)
+        ds.append(d)
+        ms.append(m)
+        time.sleep(1)
+
+    avg_tp = sum(tps) / len(tps)
+    avg_d = sum(ds) / len(ds)
+    avg_m = sum(ms) / len(ms)
+
+    print(f"{avg_tp:.7f},")
+    print(f"{avg_d:.7f},")
+    print(f"{avg_m:.7f}")
