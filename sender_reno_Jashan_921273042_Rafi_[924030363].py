@@ -129,7 +129,7 @@ def run_sender_reno():
         except (BlockingIOError, OSError):
             pass
 
-        # timeout -> slow start again
+        # timeout means slow start again
         if time.time() - last_progress > TIMEOUT:
             ssthresh = max(cwnd / 2.0, 2.0)
             cwnd = 1.0

@@ -65,7 +65,7 @@ def run_sender_fixed():
     base = 0
     next_seq = 0
 
-    first_send = {}   # seq -> time
+    first_send = {}   # seq goes to time for first message 
     delays = []
     last_progress = time.time()
 
@@ -107,7 +107,7 @@ def run_sender_fixed():
         except (BlockingIOError, OSError):
             pass
 
-        # timeout -> resend base
+        # timeout  
         if time.time() - last_progress > TIMEOUT:
             if base < total_bytes:
                 sock.sendto(make_packet(base, packets[base]), (RECEIVER_IP, RECEIVER_PORT))
