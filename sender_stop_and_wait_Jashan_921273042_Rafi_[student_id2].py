@@ -25,15 +25,14 @@ for run in range(1):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         # bind to any port other than 5001
         udp_socket.bind(("0.0.0.0", 5002 + run))
-        udp_socket.settimeout(0.10)
+        udp_socket.settimeout(0.7)
 
         start_time = time.perf_counter()
 
         seq_id = 0           # byte offset
-        bytes_sent = 0       # file bytes only (not headers)
-        delays = []          # per data-packet delay (first send -> final ack)
+        bytes_sent = 0       # file bytes only 
+        delays = []          # per data-packet delay 
 
-        # --- send file data (stop-and-wait) ---
         with open(PATH, "rb") as f:
             while True:
                 payload = f.read(message_size)
@@ -44,31 +43,36 @@ for run in range(1):
                 packet = seq_bytes + payload
 
                 first_send_time = None
-
+                sent_ok = False
                 while True:
                     if first_send_time is None:
                         first_send_time = time.perf_counter()
 
                     udp_socket.sendto(packet, receiver_address)
+                    
+                    #send once and wait for ACK, if timeout retransmit until ACK received
+                    while True:
+                        try:
+                            ack_bytes, _ = udp_socket.recvfrom(packet_size)
+                        except socket.timeout:
+                            
+                            break  # retransmit
 
-                    try:
-                        ack_bytes, _ = udp_socket.recvfrom(packet_size)
-                    except socket.timeout:
-                        continue  # retransmit
+                        ack_id = int.from_bytes(ack_bytes[:4], signed=True, byteorder="big")
+                        # receiver ACKs "next expected byte offset"
+                        if ack_id >= seq_id + len(payload):
+                            ack_time = time.perf_counter()
+                            delays.append(ack_time - first_send_time)
 
-                    ack_id = int.from_bytes(ack_bytes[:4], signed=True, byteorder="big")
-
-                    # receiver ACKs "next expected byte offset"
-                    if ack_id >= seq_id + len(payload):
-                        ack_time = time.perf_counter()
-                        delays.append(ack_time - first_send_time)
-
-                        bytes_sent += len(payload)
-                        seq_id += len(payload)
+                            bytes_sent += len(payload)
+                            seq_id += len(payload)
+                            sent_ok = True
+                            break
+                    if sent_ok:
                         break
-                    # else ignore and keep waiting/retransmitting
+ 
 
-        # --- EOF: send empty payload with correct seq_id, wait for its ACK ---
+
         eof_seq_bytes = int.to_bytes(seq_id, 4, signed=True, byteorder="big")
         eof_packet = eof_seq_bytes + b""
 
@@ -80,20 +84,21 @@ for run in range(1):
                 continue
 
             ack_id = int.from_bytes(ack_bytes[:4], signed=True, byteorder="big")
-            if ack_id >= seq_id:
+            if ack_id == seq_id:
                 break
 
-        # --- wait for FIN message ---
+        #wait for FIN message 
         while True:
             try:
                 fin_pkt, _ = udp_socket.recvfrom(packet_size)
             except socket.timeout:
+                udp_socket.sendto(eof_packet, receiver_address)
                 continue
             msg = fin_pkt[4:]
             if msg == b"fin":
                 break
 
-        # --- send FINACK so receiver exits ---
+        #  send FINACK so receiver exits
         finack_packet = int.to_bytes(0, 4, signed=True, byteorder="big") + FINACK_BODY
         udp_socket.sendto(finack_packet, receiver_address)
 
@@ -112,6 +117,6 @@ avg_throughput = sum(throughputs) / len(throughputs)
 avg_packet_delay = sum(avg_delays) / len(avg_delays)
 avg_metric = sum(metrics) / len(metrics)
 
-print(f"{avg_throughput:.7f}")
-print(f"{avg_packet_delay:.7f}")
-print(f"{avg_metric:.7f}")
+print(f"Average Throughput: {avg_throughput:.7f}")
+print(f"Average Packet Delay: {avg_packet_delay:.7f}")
+print(f"Average Metric: {avg_metric:.7f}")
