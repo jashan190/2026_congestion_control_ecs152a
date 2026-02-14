@@ -19,7 +19,7 @@ PAYLOAD_SIZE = PACKET_SIZE - SEQ_ID_SIZE
 
 WINDOW_SIZE = 100
 TIMEOUT = 0.5
-NUM_ITERATIONS = 10
+NUM_ITERATIONS = 1
 
 
 def make_packet(seq_id: int, payload: bytes) -> bytes:
