@@ -116,7 +116,7 @@ def run_sender_fixed():
     ack_done = time.time()
 
     # fin
-    for _ in range(10):
+    for _ in range(1):
         sock.sendto(make_packet(total_bytes, b""), (RECEIVER_IP, RECEIVER_PORT))
         try:
             r, _, _ = select.select([sock], [], [], 0.5)
