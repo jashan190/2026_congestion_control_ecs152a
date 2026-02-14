@@ -129,7 +129,7 @@ def run_sender_reno():
         except (BlockingIOError, OSError):
             pass
 
-        # timeout -> slow start again
+        # timeout means slow start again
         if time.time() - last_progress > TIMEOUT:
             ssthresh = max(cwnd / 2.0, 2.0)
             cwnd = 1.0
@@ -141,7 +141,7 @@ def run_sender_reno():
             last_progress = time.time()
 
     # fin
-    for _ in range(10):
+    for _ in range(1):
         sock.sendto(make_packet(total_bytes, b""), (RECEIVER_IP, RECEIVER_PORT))
         try:
             r, _, _ = select.select([sock], [], [], 0.5)
